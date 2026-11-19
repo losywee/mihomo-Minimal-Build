@@ -4,8 +4,12 @@ Automated GitHub Actions workflow to build minimal, resource-optimized releases 
 
 ## Features
 
-- **Automated Upstream Sync**: Runs daily via GitHub Actions cron to detect new upstream releases and publish builds automatically.
-- **Manual Trigger (`workflow_dispatch`)**: Build any specific release tag (e.g. `v1.19.34` or `latest`) on demand.
+- **Automated Upstream Sync (Cron)**: Runs every hour (`0 * * * *`) via GitHub Actions cron:
+  - Fetches the latest **stable** release from `MetaCubeX/mihomo` (automatically filters out `Prerelease-Alpha` and drafts).
+  - Checks if the release already exists in this repository.
+  - If a new stable release is found, it automatically starts the compilation matrix, compresses the binaries, and creates a GitHub Release.
+  - If no new version exists, the workflow exits in ~3 seconds without consuming build minutes.
+- **Manual Trigger (`workflow_dispatch`)**: Build any specific release tag (e.g. `v1.19.34` or `latest`) on demand with a `force_build` toggle.
 - **Cross-Platform Architecture Matrix**:
   - **Linux (Embedded & Servers)**:
     - `linux-arm64`
@@ -38,18 +42,9 @@ Automated GitHub Actions workflow to build minimal, resource-optimized releases 
 
 ## Repository Setup
 
-To run this in your own GitHub repository:
-
-1. Push this repository to GitHub:
-   ```bash
-   git add .
-   git commit -m "feat: add macos and windows support"
-   git push origin main
-   ```
-2. Enable Workflow Read & Write Permissions:
+1. Enable Workflow Read & Write Permissions:
    - Go to **Settings** > **Actions** > **General** > **Workflow permissions**.
    - Select **Read and write permissions**.
    - Check **Allow GitHub Actions to create and approve pull requests**.
    - Click **Save**.
-3. Trigger manually or wait for the daily scheduled job:
-   - Go to **Actions** > **Build Minimal Mihomo** > **Run workflow**.
+2. The hourly cron will automatically detect and build every new stable release upstream. You can also trigger it manually from **Actions** > **Build Minimal Mihomo** > **Run workflow**.

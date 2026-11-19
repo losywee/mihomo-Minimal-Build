@@ -2,7 +2,8 @@ name: Build Minimal Mihomo
 
 on:
   schedule:
-    - cron: '0 2 * * *' # Check daily at 02:00 UTC
+    # Run every hour to check for new upstream stable releases
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       version:
@@ -35,35 +36,53 @@ jobs:
       version: ${{ steps.get-ver.outputs.version }}
       build_needed: ${{ steps.get-ver.outputs.build_needed }}
     steps:
-      - name: Determine Target Version
+      - name: Check for New Stable Release
         id: get-ver
         run: |
           INPUT_VER="${{ github.event.inputs.version }}"
           FORCE="${{ github.event.inputs.force_build }}"
 
           if [ -z "$INPUT_VER" ] || [ "$INPUT_VER" = "latest" ]; then
-            UPSTREAM_TAG=$(curl -sL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.tag_name')
+            # Query GitHub API for the latest stable release (automatically excludes pre-releases and drafts)
+            UPSTREAM_TAG=$(curl -sL \
+              -H "User-Agent: GitHub-Action" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.tag_name // empty')
+
+            # Fallback filter from releases list if /releases/latest endpoint is uncached
+            if [ -z "$UPSTREAM_TAG" ] || [ "$UPSTREAM_TAG" = "null" ]; then
+              UPSTREAM_TAG=$(curl -sL \
+                -H "User-Agent: GitHub-Action" \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/repos/MetaCubeX/mihomo/releases?per_page=10 | \
+                jq -r 'first(.[] | select(.prerelease == false and .draft == false)) | .tag_name // empty')
+            fi
           else
             UPSTREAM_TAG="$INPUT_VER"
           fi
 
           if [ -z "$UPSTREAM_TAG" ] || [ "$UPSTREAM_TAG" = "null" ]; then
-            echo "Failed to fetch upstream release tag." >&2
+            echo "::error::Failed to retrieve a valid upstream release tag."
             exit 1
           fi
 
-          echo "Target upstream tag: $UPSTREAM_TAG"
+          echo "Latest upstream stable release: $UPSTREAM_TAG"
           echo "version=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
 
-          # Check if tag already exists in this repo
-          CURRENT_RELEASE=$(curl -sL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          # Check if this release already exists in current repository
+          CURRENT_RELEASE=$(curl -sL \
+            -H "User-Agent: GitHub-Action" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${UPSTREAM_TAG}" | jq -r '.tag_name // empty')
 
           if [ "$CURRENT_RELEASE" = "$UPSTREAM_TAG" ] && [ "$FORCE" != "true" ]; then
-            echo "Release $UPSTREAM_TAG already exists in this repo. Skipping build."
+            echo "Release $UPSTREAM_TAG already exists in this repository. No build required."
             echo "build_needed=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Building $UPSTREAM_TAG..."
+            echo "New stable release detected or rebuild requested ($UPSTREAM_TAG). Proceeding to build."
             echo "build_needed=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -195,7 +214,7 @@ jobs:
           body: |
             ### Mihomo Minimal Build (${{ needs.check-version.outputs.version }})
 
-            Optimized, resource-constrained builds for Linux, macOS, and Windows.
+            Automated resource-constrained minimal builds for Linux, macOS, and Windows.
 
             #### Platforms Included:
             - **Linux**: arm64, armv7, armv6, armv5, mipsle (soft/hard), mips (soft/hard), amd64, 386, riscv64, loong64
