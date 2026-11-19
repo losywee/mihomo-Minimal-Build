@@ -75,22 +75,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Embedded ARM
+          # Linux ARM (Embedded Routers & SBCs)
           - { goos: linux, goarch: arm64, name: linux-arm64 }
           - { goos: linux, goarch: arm, goarm: '7', name: linux-armv7 }
           - { goos: linux, goarch: arm, goarm: '6', name: linux-armv6 }
           - { goos: linux, goarch: arm, goarm: '5', name: linux-armv5 }
-          # Embedded MIPS / MIPSEL (OpenWrt routers)
+          # Linux MIPS / MIPSEL (OpenWrt routers)
           - { goos: linux, goarch: mipsle, gomips: softfloat, name: linux-mipsle-softfloat }
           - { goos: linux, goarch: mipsle, gomips: hardfloat, name: linux-mipsle-hardfloat }
           - { goos: linux, goarch: mips, gomips: softfloat, name: linux-mips-softfloat }
           - { goos: linux, goarch: mips, gomips: hardfloat, name: linux-mips-hardfloat }
-          # x86 / x86_64
+          # Linux x86 / x86_64
           - { goos: linux, goarch: amd64, name: linux-amd64 }
           - { goos: linux, goarch: '386', name: linux-386 }
-          # RISC-V & LoongArch
+          # Linux RISC-V & LoongArch
           - { goos: linux, goarch: riscv64, name: linux-riscv64 }
           - { goos: linux, goarch: loong64, name: linux-loong64 }
+          # macOS (Darwin)
+          - { goos: darwin, goarch: arm64, name: darwin-arm64 }
+          - { goos: darwin, goarch: amd64, name: darwin-amd64 }
+          # Windows
+          - { goos: windows, goarch: amd64, name: windows-amd64 }
+          - { goos: windows, goarch: arm64, name: windows-arm64 }
+          - { goos: windows, goarch: '386', name: windows-386 }
     steps:
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -98,11 +105,11 @@ jobs:
           go-version: 'stable'
           check-latest: true
 
-      - name: Install UPX
+      - name: Install UPX and Zip
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.upx != 'false' }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y upx-ucl
+          sudo apt-get install -y upx-ucl zip
 
       - name: Checkout MetaCubeX/mihomo
         uses: actions/checkout@v4
@@ -124,28 +131,39 @@ jobs:
           BUILDTIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           OUTPUT="mihomo-${{ matrix.name }}"
 
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BIN_NAME="${OUTPUT}.exe"
+          else
+            BIN_NAME="${OUTPUT}"
+          fi
+
           go build -v -trimpath \
             -tags "no_easytier,no_zerotier,no_tailscale,no_fake_tcp,with_low_memory" \
             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' \
                      -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' \
                      -s -w -buildid=" \
-            -o "$OUTPUT"
+            -o "$BIN_NAME"
 
-          # UPX compression (fallback gracefully if architecture is unsupported)
+          # UPX compression (gracefully falls back if unsupported by platform/arch)
           if [ "${{ github.event_name != 'workflow_dispatch' || github.event.inputs.upx != 'false' }}" = "true" ]; then
-            echo "Attempting UPX compression on $OUTPUT..."
-            upx --lzma "$OUTPUT" || upx -9 "$OUTPUT" || echo "UPX compression skipped for $OUTPUT"
+            echo "Attempting UPX compression on $BIN_NAME..."
+            upx --lzma "$BIN_NAME" || upx -9 "$BIN_NAME" || echo "UPX compression skipped for $BIN_NAME"
           fi
 
-          tar -czvf "${OUTPUT}.tar.gz" "$OUTPUT"
           mkdir -p dist
-          mv "${OUTPUT}.tar.gz" dist/
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "dist/${OUTPUT}.zip" "$BIN_NAME"
+          else
+            tar -czvf "dist/${OUTPUT}.tar.gz" "$BIN_NAME"
+          fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: mihomo-${{ matrix.name }}
-          path: mihomo/dist/*.tar.gz
+          path: |
+            mihomo/dist/*.tar.gz
+            mihomo/dist/*.zip
 
   release:
     needs: [check-version, build]
@@ -160,7 +178,7 @@ jobs:
       - name: Generate Checksums
         working-directory: dist
         run: |
-          sha256sum *.tar.gz > sha256sums.txt
+          find . -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} + > sha256sums.txt
           cat sha256sums.txt
 
       - name: Publish GitHub Release
@@ -172,11 +190,17 @@ jobs:
           prerelease: false
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/sha256sums.txt
           body: |
-            ### Mihomo Minimal Embedded Build (${{ needs.check-version.outputs.version }})
+            ### Mihomo Minimal Build (${{ needs.check-version.outputs.version }})
 
-            Optimized build specifically designed for embedded devices, routers, and memory-constrained environments.
+            Optimized, resource-constrained builds for Linux, macOS, and Windows.
+
+            #### Platforms Included:
+            - **Linux**: arm64, armv7, armv6, armv5, mipsle (soft/hard), mips (soft/hard), amd64, 386, riscv64, loong64
+            - **macOS**: Apple Silicon (`darwin-arm64`), Intel (`darwin-amd64`)
+            - **Windows**: x64 (`windows-amd64`), ARM64 (`windows-arm64`), x86 (`windows-386`)
 
             #### Optimizations Applied:
             - **Stripped Heavy Outbound Protocols**: `-tags "no_easytier,no_zerotier,no_tailscale"`
@@ -184,4 +208,4 @@ jobs:
             - **Stripped FakeTCP**: `-tags "no_fake_tcp"`
             - **Low-Memory Relay Buffers**: `-tags "with_low_memory"` (16 KiB TCP / 8 KiB UDP buffer pools)
             - **Stripped Debug Symbols**: `-ldflags "-s -w -buildid="`
-            - **UPX LZMA Compressed**: Squeezes final binary down to ~8 MB for flash-constrained storage
+            - **UPX LZMA Compressed** on supported platforms
