@@ -1,0 +1,6 @@
+# Binaries and build artifacts
+dist/
+mihomo/
+*.tar.gz
+*.exe
+mihomo-*

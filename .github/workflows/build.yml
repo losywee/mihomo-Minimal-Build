@@ -1,0 +1,187 @@
+name: Build Minimal Mihomo
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # Check daily at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream Mihomo Tag (e.g., v1.19.34 or latest)'
+        required: true
+        default: 'latest'
+      upx:
+        description: 'Enable UPX compression'
+        type: boolean
+        required: true
+        default: true
+      force_build:
+        description: 'Force build even if release already exists'
+        type: boolean
+        required: true
+        default: false
+  push:
+    paths:
+      - '.github/workflows/**'
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-ver.outputs.version }}
+      build_needed: ${{ steps.get-ver.outputs.build_needed }}
+    steps:
+      - name: Determine Target Version
+        id: get-ver
+        run: |
+          INPUT_VER="${{ github.event.inputs.version }}"
+          FORCE="${{ github.event.inputs.force_build }}"
+
+          if [ -z "$INPUT_VER" ] || [ "$INPUT_VER" = "latest" ]; then
+            UPSTREAM_TAG=$(curl -sL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.tag_name')
+          else
+            UPSTREAM_TAG="$INPUT_VER"
+          fi
+
+          if [ -z "$UPSTREAM_TAG" ] || [ "$UPSTREAM_TAG" = "null" ]; then
+            echo "Failed to fetch upstream release tag." >&2
+            exit 1
+          fi
+
+          echo "Target upstream tag: $UPSTREAM_TAG"
+          echo "version=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+
+          # Check if tag already exists in this repo
+          CURRENT_RELEASE=$(curl -sL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${UPSTREAM_TAG}" | jq -r '.tag_name // empty')
+
+          if [ "$CURRENT_RELEASE" = "$UPSTREAM_TAG" ] && [ "$FORCE" != "true" ]; then
+            echo "Release $UPSTREAM_TAG already exists in this repo. Skipping build."
+            echo "build_needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Building $UPSTREAM_TAG..."
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Embedded ARM
+          - { goos: linux, goarch: arm64, name: linux-arm64 }
+          - { goos: linux, goarch: arm, goarm: '7', name: linux-armv7 }
+          - { goos: linux, goarch: arm, goarm: '6', name: linux-armv6 }
+          - { goos: linux, goarch: arm, goarm: '5', name: linux-armv5 }
+          # Embedded MIPS / MIPSEL (OpenWrt routers)
+          - { goos: linux, goarch: mipsle, gomips: softfloat, name: linux-mipsle-softfloat }
+          - { goos: linux, goarch: mipsle, gomips: hardfloat, name: linux-mipsle-hardfloat }
+          - { goos: linux, goarch: mips, gomips: softfloat, name: linux-mips-softfloat }
+          - { goos: linux, goarch: mips, gomips: hardfloat, name: linux-mips-hardfloat }
+          # x86 / x86_64
+          - { goos: linux, goarch: amd64, name: linux-amd64 }
+          - { goos: linux, goarch: '386', name: linux-386 }
+          # RISC-V & LoongArch
+          - { goos: linux, goarch: riscv64, name: linux-riscv64 }
+          - { goos: linux, goarch: loong64, name: linux-loong64 }
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Install UPX
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.upx != 'false' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx-ucl
+
+      - name: Checkout MetaCubeX/mihomo
+        uses: actions/checkout@v4
+        with:
+          repository: MetaCubeX/mihomo
+          ref: ${{ needs.check-version.outputs.version }}
+          path: mihomo
+
+      - name: Compile Minimal Binary
+        working-directory: mihomo
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
+          CGO_ENABLED: 0
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          BUILDTIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          OUTPUT="mihomo-${{ matrix.name }}"
+
+          go build -v -trimpath \
+            -tags "no_easytier,no_zerotier,no_tailscale,no_fake_tcp,with_low_memory" \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' \
+                     -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' \
+                     -s -w -buildid=" \
+            -o "$OUTPUT"
+
+          # UPX compression (fallback gracefully if architecture is unsupported)
+          if [ "${{ github.event_name != 'workflow_dispatch' || github.event.inputs.upx != 'false' }}" = "true" ]; then
+            echo "Attempting UPX compression on $OUTPUT..."
+            upx --lzma "$OUTPUT" || upx -9 "$OUTPUT" || echo "UPX compression skipped for $OUTPUT"
+          fi
+
+          tar -czvf "${OUTPUT}.tar.gz" "$OUTPUT"
+          mkdir -p dist
+          mv "${OUTPUT}.tar.gz" dist/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-${{ matrix.name }}
+          path: mihomo/dist/*.tar.gz
+
+  release:
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate Checksums
+        working-directory: dist
+        run: |
+          sha256sum *.tar.gz > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check-version.outputs.version }}
+          name: Mihomo Minimal ${{ needs.check-version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/sha256sums.txt
+          body: |
+            ### Mihomo Minimal Embedded Build (${{ needs.check-version.outputs.version }})
+
+            Optimized build specifically designed for embedded devices, routers, and memory-constrained environments.
+
+            #### Optimizations Applied:
+            - **Stripped Heavy Outbound Protocols**: `-tags "no_easytier,no_zerotier,no_tailscale"`
+            - **Excluded gVisor Userland Stack**: Omitted `with_gvisor` (relies on lightweight `mips` or kernel `system` stack)
+            - **Stripped FakeTCP**: `-tags "no_fake_tcp"`
+            - **Low-Memory Relay Buffers**: `-tags "with_low_memory"` (16 KiB TCP / 8 KiB UDP buffer pools)
+            - **Stripped Debug Symbols**: `-ldflags "-s -w -buildid="`
+            - **UPX LZMA Compressed**: Squeezes final binary down to ~8 MB for flash-constrained storage
