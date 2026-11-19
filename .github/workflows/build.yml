@@ -3,7 +3,7 @@ name: Build Minimal Mihomo
 on:
   schedule:
     # Run every hour to check for new upstream stable releases
-    - cron: '0 * * * *'
+    - cron: '0 0 */2 * *'
   workflow_dispatch:
     inputs:
       version:
